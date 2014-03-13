@@ -1,0 +1,188 @@
+#!/usr/bin/python
+
+import os
+
+class Mount(object):
+    VFSTAB_FILE = '/etc/vfstab'
+
+    def __init__(self, module):
+        self.module = module
+        self.src     = module.params['src']
+        self.raw     = module.params['raw']
+        self.name    = module.params['name']
+        self.fstyp   = module.params['fstyp']
+        self.passno  = module.params['passno']
+        self.at_boot = module.params['at_boot']
+        self.opts    = module.params['opts']
+        self.force   = module.params['force']
+
+    def read_vfstab(self):
+        self.vfstab = []
+        with open(Mount.VFSTAB_FILE, 'r') as f:
+            for line in f:
+                self.vfstab.append(line.strip())
+
+    def write_vfstab(self):
+        with open(Mount.VFSTAB_FILE, 'w') as f:
+            for line in self.vfstab:
+                f.write(line + '\n')
+
+    def entry_exists(self):
+        exists = False
+        for line in self.vfstab:
+            field = line.split()
+            if field[0].count('#') > 0:
+                continue
+            if self.name == field[2]:
+                exists = True
+        return exists
+
+    def edit_entry(self):
+        changed = False
+        for i in range(0, len(self.vfstab)):
+            field = self.vfstab[i].split()
+            if field[0].count('#') > 0:
+                continue
+            if self.name == field[2]:
+                if self.src != field[0] or \
+                  self.raw != field[1] or \
+                  self.fstyp != field[3] or \
+                  self.passno != field[4] or \
+                  self.at_boot != field[5] or \
+                  self.opts != field[6]:
+                    self.vfstab[i] = '%s %s %s %s %s %s %s' % (self.src,
+                      self.raw, self.name, self.fstyp,
+                      self.passno, self.at_boot, self.opts)
+                    changed = True
+                break
+        return changed
+
+    def add_entry(self):
+        self.vfstab.append('%s %s %s %s %s %s %s' % (self.src,
+        self.raw, self.name, self.fstyp,
+        self.passno, self.at_boot, self.opts))
+
+    def delete_entry(self):
+        changed = False
+        for i in range(0, len(self.vfstab)):
+            field = self.vfstab[i].split()
+            if field[0].count('#') > 0:
+                continue
+            if self.name == field[2]:
+                del self.vfstab[i]
+                changed = True
+                break
+                
+        return changed
+
+    def delete_directory(self):
+        if os.path.isdir(self.name):
+            try:
+                os.rmdir(self.name)
+            except Exception as e:
+                self.module.fail_json(msg = 'Error deleting directory %s:' % (self.name, str(e)))
+
+    def mount_filesystem(self):
+        if os.path.ismount(self.name):
+            return False
+        else:
+            if not os.path.isdir(self.name):
+                os.makedirs(self.name, 0755)
+            cmd = '%s -F %s -o %s %s %s' % (self.module.get_bin_path('mount', True), self.fstyp, self.opts, self.src, self.name)
+            print cmd
+            (rc, out, err) = self.module.run_command(cmd)
+            if rc != 0:
+                self.module.fail_json(msg='mount of %s failed: %s %s' % (self.name, out, err))
+            return True
+
+    def unmount_filesystem(self):
+        if os.path.ismount(self.name):
+            if self.force:
+                force_opt = '-f'
+            else:
+                force_opt = ''
+            cmd = '%s %s %s' % (self.module.get_bin_path('umount', True), force_opt, self.name)
+            (rc, out, err) = self.module.run_command(cmd)
+            if rc != 0:
+                self.module.fail_json(msg='unmount of %s failed: %s %s' % (self.name, out, err))
+            return True
+        return False
+
+    # See if currently mounted file system matches what's in the vfstab. Note: it doesn't currently
+    # check to see if the mount options are different as Solaris can add others to the list and
+    # re-order them. TODO: can we check the mount options in a reliable way?
+    def mount_different(self):
+        cmd = '%s -p' % (self.module.get_bin_path('mount', True))
+        (rc, out, err) = self.module.run_command(cmd)
+        if rc != 0:
+            self.module.fail_json(msg='mount -p command failed: %s %s' % (self.name, out, err))
+        for line in out.split('\n'):
+            if len(line) == 0:
+                continue
+            field = line.split()
+            if field[2] == self.name:
+                if self.src == field[0] or \
+                  self.raw == field[1] or \
+                  self.fstyp == field[3] or \
+                  self.passno == field[4] or \
+                  self.at_boot == field[5]:
+                    return False
+        return True
+
+def main():
+    module = AnsibleModule(
+        argument_spec  = dict(
+            state   = dict(required=True, choices=['mounted', 'present', 'unmounted', 'absent']),
+            name    = dict(required=True),
+            src     = dict(required=True),
+            raw     = dict(default='-'),
+            fstyp   = dict(required=True),
+            passno  = dict(default='-'),
+            at_boot = dict(default='yes'),
+            opts    = dict(require=True),
+            force   = dict(default=False)
+        )
+    )
+
+    mount = Mount(module)
+    mount.read_vfstab()
+    vfstab_changed = False
+    mount_changed = False
+    if module.params['state'] == 'mounted':
+        if mount.entry_exists():
+            vfstab_changed = mount.edit_entry()
+        else:
+            mount.add_entry()
+            vfstab_changed = True
+        if vfstab_changed or mount.mount_different():
+            mount.unmount_filesystem()
+            mount.mount_filesystem()
+            mount_changed = True
+        if vfstab_changed:
+            mount.write_vfstab()
+        module.exit_json(changed = vfstab_changed | mount_changed, vfstab_changed = vfstab_changed, mount_changed = mount_changed)
+    elif module.params['state'] == 'present':
+        if mount.entry_exists():
+            vfstab_changed = mount.edit_entry()
+        else:
+            mount.add_entry()
+            vfstab_changed = True
+        if vfstab_changed:
+            mount.write_vfstab()
+        module.exit_json(changed = vfstab_changed, vfstab_changed = vfstab_changed)
+    elif module.params['state'] == 'unmounted':
+        mount_changed = mount.unmount_filesystem()
+        module.exit_json(changed = mount_changed, mount_changed = mount_changed)
+    elif module.params['state'] == 'absent':
+        mount_changed = mount.unmount_filesystem()
+        if mount.entry_exists():
+            vfstab_changed = mount.delete_entry()
+            mount.delete_directory()
+            mount.write_vfstab()
+        module.exit_json(changed = vfstab_changed | mount_changed, vfstab_changed = vfstab_changed, mount_changed = mount_changed)
+    
+    module.fail_json(msg="Oops! Shouldn't reach here!")
+
+# include magic from lib/ansible/module_common.py
+#<<INCLUDE_ANSIBLE_MODULE_COMMON>>
+main()
