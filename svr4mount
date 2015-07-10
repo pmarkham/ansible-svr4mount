@@ -66,7 +66,7 @@ class Mount(object):
         changed = False
         for i in range(0, len(self.vfstab)):
             field = self.vfstab[i].split()
-            if field[0].count('#') > 0:
+            if len(field) == 0 or field[0].count('#') > 0:
                 continue
             if self.name == field[2]:
                 del self.vfstab[i]
